@@ -634,3 +634,139 @@ Read (fetch notifications) → Read Replica
 | 4th | Read Replicas | Long-term scaling solution |
 
 Implementing Redis caching + pagination alone can reduce DB load by over 90% without major infrastructure changes.
+
+---
+
+# Stage 5
+
+## Given Pseudocode
+
+```
+function notify_all(student_ids: array, message: string):
+    for student_id in student_ids:
+        send_email(student_id, message)   # calls Email API
+        save_to_db(student_id, message)   # DB insert
+        push_to_app(student_id, message)  # WebSocket push
+```
+
+---
+
+## Shortcomings of This Implementation
+
+| Problem | Explanation |
+|---|---|
+| Sequential processing | Notifies students one by one — 50,000 students will take very long |
+| No error handling | If send_email fails, the loop stops or skips silently |
+| No retry mechanism | Failed emails are lost permanently |
+| DB and email in same loop | If DB insert fails after email sent, data is inconsistent |
+| Single point of failure | One failure can break the entire notification batch |
+| Blocking operation | Everything runs synchronously — server is blocked during the whole process |
+
+---
+
+## What Happened — Email Failed for 200 Students Midway
+
+Since there is no error handling or retry logic, those 200 students:
+- Never received the email
+- May or may not have the notification saved in DB
+- Cannot be easily identified without logs
+- Cannot be retried automatically
+
+---
+
+## Redesigned Solution — Queue-Based Architecture
+
+### Core Idea
+Instead of processing all 50,000 students directly, push each notification into a **message queue** (like RabbitMQ or Redis Queue). Worker processes then pick from the queue and handle each student independently.
+
+```
+HR clicks "Notify All"
+    ↓
+Push 50,000 jobs into Queue (fast — takes seconds)
+    ↓
+Multiple Worker processes pick jobs from queue
+    ↓
+Each worker independently:
+    - Saves to DB first
+    - Sends email
+    - Pushes to app via WebSocket
+    ↓
+If any step fails → job goes back to queue for retry
+```
+
+---
+
+## Should DB Save and Email Happen Together?
+
+### No — They Should Be Separate ✅
+
+| Reason | Explanation |
+|---|---|
+| Different failure modes | Email API can fail independently of DB |
+| DB save should happen first | Notification must exist in DB before being sent |
+| Email is external dependency | External APIs are unreliable — must handle separately |
+| Atomicity not possible | Cannot rollback an already-sent email |
+
+### Correct Order:
+1. **Save to DB first** — notification is recorded
+2. **Send email** — if fails, retry only the email (DB record already safe)
+3. **Push to app** — real-time delivery via WebSocket
+
+---
+
+## Revised Pseudocode
+
+```
+function notify_all(student_ids: array, message: string):
+    for student_id in student_ids:
+        queue.push({
+            student_id: student_id,
+            message: message
+        })
+
+# Worker process (runs in parallel — multiple workers)
+function worker():
+    while queue is not empty:
+        job = queue.pop()
+        
+        try:
+            # Step 1: Save to DB first
+            save_to_db(job.student_id, job.message)
+            
+            # Step 2: Send email
+            send_email(job.student_id, job.message)
+            
+            # Step 3: Push real-time notification
+            push_to_app(job.student_id, job.message)
+            
+            mark_job_as_done(job)
+            
+        except EmailFailure:
+            # Retry email only — DB already saved
+            retry_queue.push(job)
+            log_failure(job.student_id, "email_failed")
+            
+        except DBFailure:
+            # Retry entire job
+            retry_queue.push(job)
+            log_failure(job.student_id, "db_failed")
+
+# Retry worker — handles failed jobs
+function retry_worker():
+    while retry_queue is not empty:
+        job = retry_queue.pop()
+        worker.process(job)
+```
+
+---
+
+## Benefits of Redesigned Solution
+
+| Benefit | Explanation |
+|---|---|
+| Fast | All 50,000 jobs pushed to queue in seconds |
+| Reliable | Failed jobs are retried automatically |
+| Parallel | Multiple workers process simultaneously |
+| No data loss | DB saved before email sent |
+| Fault tolerant | One failure does not affect other students |
+| Scalable | Add more workers to handle larger batches |
