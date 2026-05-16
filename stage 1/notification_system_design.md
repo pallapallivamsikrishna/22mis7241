@@ -373,3 +373,144 @@ ON notifications(studentId);
 CREATE INDEX idx_notifications_student_read_date 
 ON notifications(studentId, isRead, createdAt DESC);
 ```
+
+---
+
+# Stage 3
+
+## The Slow Query
+
+```sql
+SELECT * FROM notifications
+WHERE studentID = 1042
+AND isRead = false
+ORDER BY createdAt ASC;
+```
+
+---
+
+## Is This Query Accurate?
+
+The query is **logically correct** — it fetches unread notifications for a student ordered by date.
+
+However it is **NOT efficient** for a database with 50,000 students and 5,000,000 notifications.
+
+---
+
+## Why Is This Query Slow?
+
+| Problem | Explanation |
+|---|---|
+| No index on studentID | Database scans all 5 million rows to find student 1042 |
+| No index on isRead | Cannot quickly filter unread — another full scan |
+| No index on createdAt | Sorting 5 million rows after scanning is very expensive |
+| SELECT * used | Fetches all columns even if not needed — wastes memory |
+| Full table scan | With 5M rows, this can take several seconds |
+
+---
+
+## Computation Cost
+
+| Operation | Cost |
+|---|---|
+| Full table scan (no index) | O(n) — scans all 5 million rows |
+| Filtering without index | O(n) — checks every row |
+| Sorting without index | O(n log n) — very expensive on large data |
+| **Total** | **Very High — unacceptable for production** |
+
+---
+
+## What Would You Change?
+
+### 1. Add Composite Index
+
+```sql
+CREATE INDEX idx_notifications_student_read_date
+ON notifications(studentID, isRead, createdAt ASC);
+```
+
+This single index handles all three WHERE and ORDER BY conditions together — query becomes O(log n) instead of O(n).
+
+### 2. Replace SELECT * with Specific Columns
+
+```sql
+SELECT id, studentID, type, message, isRead, createdAt
+FROM notifications
+WHERE studentID = 1042
+AND isRead = false
+ORDER BY createdAt ASC
+LIMIT 20 OFFSET 0;
+```
+
+### 3. Add Pagination
+
+Without LIMIT, even an optimized query returns thousands of rows at once — always paginate.
+
+---
+
+## Optimized Query
+
+```sql
+SELECT id, type, message, isRead, createdAt
+FROM notifications
+WHERE studentID = 1042
+AND isRead = false
+ORDER BY createdAt ASC
+LIMIT 20 OFFSET 0;
+```
+
+**Cost after optimization:** O(log n) — extremely fast even with 5 million rows.
+
+---
+
+## Should We Add Indexes on Every Column?
+
+### No — This Is Bad Advice ❌
+
+| Reason | Explanation |
+|---|---|
+| Extra storage | Each index takes significant disk space |
+| Slower writes | Every INSERT/UPDATE must update all indexes |
+| Unnecessary overhead | Indexes on unused columns waste resources |
+| Query planner confusion | Too many indexes can confuse the DB optimizer |
+
+### Correct Approach ✅
+
+Only add indexes on columns that are:
+- Used in WHERE clauses frequently
+- Used in ORDER BY clauses
+- Used in JOIN conditions
+
+For our notifications table, only these indexes are needed:
+
+```sql
+-- Most important: covers the main query pattern
+CREATE INDEX idx_notifications_student_read_date
+ON notifications(studentID, isRead, createdAt ASC);
+
+-- For filtering by type
+CREATE INDEX idx_notifications_type
+ON notifications(notificationType);
+```
+
+---
+
+## Query: Students Who Got Placement Notification in Last 7 Days
+
+```sql
+SELECT DISTINCT studentID
+FROM notifications
+WHERE notificationType = 'Placement'
+AND createdAt >= NOW() - INTERVAL '7 days';
+```
+
+### With Student Details:
+
+```sql
+SELECT DISTINCT s.id, s.name, s.email, s.rollNumber
+FROM students s
+JOIN notifications n ON s.id = n.studentID
+WHERE n.notificationType = 'Placement'
+AND n.createdAt >= NOW() - INTERVAL '7 days'
+ORDER BY s.name ASC;
+```
