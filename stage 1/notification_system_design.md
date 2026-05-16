@@ -514,3 +514,123 @@ WHERE n.notificationType = 'Placement'
 AND n.createdAt >= NOW() - INTERVAL '7 days'
 ORDER BY s.name ASC;
 ```
+
+---
+
+# Stage 4
+
+## Problem
+Notifications are being fetched on every page load for every student, causing the database to get overwhelmed and resulting in bad user experience.
+
+---
+
+## Solutions
+
+### Strategy 1 — Caching with Redis ✅ (Recommended)
+
+Instead of hitting the database on every page load, store the results in Redis (in-memory cache) for a short time.
+
+**How it works:**
+```
+Student loads page
+    ↓
+Check Redis cache first
+    ↓
+If data exists in cache → return immediately (no DB hit)
+If not in cache → fetch from DB → store in Redis → return to student
+```
+
+**Implementation:**
+```javascript
+// Check cache first
+const cached = await redis.get(`notifications:${studentId}`);
+if (cached) return JSON.parse(cached);
+
+// If not cached, fetch from DB
+const data = await db.query(`SELECT * FROM notifications WHERE studentId = $1`, [studentId]);
+
+// Store in cache for 60 seconds
+await redis.setex(`notifications:${studentId}`, 60, JSON.stringify(data));
+return data;
+```
+
+**Tradeoffs:**
+| Benefit | Drawback |
+|---|---|
+| Extremely fast response | Slight delay in showing newest notifications |
+| Reduces DB load by 90%+ | Extra infrastructure (Redis server needed) |
+| Scales to millions of users | Cache invalidation logic needed |
+
+---
+
+### Strategy 2 — Pagination
+
+Instead of loading ALL notifications on every page load, load only a small batch at a time.
+
+**How it works:**
+```
+GET /notifications?page=1&limit=20
+```
+
+Only 20 notifications are fetched instead of hundreds — much less DB load.
+
+**Tradeoffs:**
+| Benefit | Drawback |
+|---|---|
+| Much less data transferred | User must click to load more |
+| Faster page load | More complex frontend logic |
+| Reduces DB query cost | |
+
+---
+
+### Strategy 3 — Polling Reduction (Use WebSockets instead)
+
+Currently fetching on every page load = constant DB hits. Replace with WebSockets so server only pushes when there is a NEW notification.
+
+**How it works:**
+```
+Student connects once via WebSocket
+    ↓
+Server pushes notification only when new one arrives
+    ↓
+No repeated page load DB hits
+```
+
+**Tradeoffs:**
+| Benefit | Drawback |
+|---|---|
+| Zero unnecessary DB hits | WebSocket server needed |
+| Real-time updates | More complex to implement |
+| Best user experience | Persistent connection needed |
+
+---
+
+### Strategy 4 — Database Read Replicas
+
+Create separate read-only copies of the database. All GET (read) queries go to replicas, only writes go to main DB.
+
+**How it works:**
+```
+Write (mark as read) → Main DB
+Read (fetch notifications) → Read Replica
+```
+
+**Tradeoffs:**
+| Benefit | Drawback |
+|---|---|
+| Main DB is never overloaded | Extra cost for replica servers |
+| Scales reads independently | Slight replication lag possible |
+| No code changes needed | More infrastructure to manage |
+
+---
+
+## Recommended Combined Solution
+
+| Priority | Strategy | Reason |
+|---|---|---|
+| 1st | Redis Caching | Fastest win — reduces DB load immediately |
+| 2nd | Pagination | Reduces data per request |
+| 3rd | WebSockets | Eliminates unnecessary polling |
+| 4th | Read Replicas | Long-term scaling solution |
+
+Implementing Redis caching + pagination alone can reduce DB load by over 90% without major infrastructure changes.
