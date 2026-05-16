@@ -266,3 +266,110 @@ Client receives and displays notification
 | GET    | /notifications/{id}         | Fetch single notification        |
 | PATCH  | /notifications/{id}/read    | Mark one notification as read    |
 | PATCH  | /notifications/read-all     | Mark all notifications as read   |
+
+
+---
+
+# Stage 2
+
+## Database Choice: PostgreSQL
+
+### Why PostgreSQL?
+- Structured, relational data — notifications have fixed fields
+- Supports powerful indexing for fast queries
+- ACID compliant — ensures data is never lost
+- Handles relationships between students and notifications easily
+- Better than MongoDB here because data structure is predictable
+
+---
+
+## Database Schema
+
+```sql
+CREATE TABLE students (
+    id          SERIAL PRIMARY KEY,
+    name        VARCHAR(100) NOT NULL,
+    email       VARCHAR(150) UNIQUE NOT NULL,
+    rollNumber  VARCHAR(20) UNIQUE NOT NULL,
+    createdAt   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE notifications (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    studentId   INT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    type        VARCHAR(50) NOT NULL CHECK (type IN ('Placement', 'Result', 'Event')),
+    message     TEXT NOT NULL,
+    isRead      BOOLEAN DEFAULT FALSE,
+    createdAt   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+---
+
+## Problems as Data Volume Increases
+
+| Problem | Explanation |
+|---|---|
+| Slow queries | Millions of rows cause full table scans |
+| High DB load | Every page load hits the database directly |
+| Storage limits | Notifications accumulate without cleanup |
+| Sorting cost | ORDER BY on large tables is expensive |
+
+---
+
+## Solutions
+
+| Problem | Solution |
+|---|---|
+| Slow queries | Add indexes on studentId, isRead, createdAt |
+| High DB load | Use Redis caching for frequent queries |
+| Storage limits | Archive old notifications after 6 months |
+| Sorting cost | Composite index on (studentId, createdAt) |
+
+---
+
+## SQL Queries Based on Stage 1 APIs
+
+### GET /notifications — Fetch all notifications for a student
+```sql
+SELECT id, type, message, isRead, createdAt
+FROM notifications
+WHERE studentId = 1042
+ORDER BY createdAt DESC
+LIMIT 20 OFFSET 0;
+```
+
+### GET /notifications?notification_type=Placement — Filter by type
+```sql
+SELECT id, type, message, isRead, createdAt
+FROM notifications
+WHERE studentId = 1042
+AND type = 'Placement'
+ORDER BY createdAt DESC
+LIMIT 20 OFFSET 0;
+```
+
+### PATCH /notifications/{id}/read — Mark one as read
+```sql
+UPDATE notifications
+SET isRead = true
+WHERE id = 'a1b2c3d4'
+AND studentId = 1042;
+```
+
+### PATCH /notifications/read-all — Mark all as read
+```sql
+UPDATE notifications
+SET isRead = true
+WHERE studentId = 1042
+AND isRead = false;
+```
+
+### Indexes for Performance
+```sql
+CREATE INDEX idx_notifications_studentId 
+ON notifications(studentId);
+
+CREATE INDEX idx_notifications_student_read_date 
+ON notifications(studentId, isRead, createdAt DESC);
+```
